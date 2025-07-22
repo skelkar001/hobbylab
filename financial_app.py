@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 import json
 from scipy import stats
+import sqlite3
+import os
 
 # Set page configuration
 st.set_page_config(
@@ -53,6 +55,101 @@ HISTORICAL_RETURNS = {
         'annual_returns': [0.0287] * 50  # Simplified constant returns for cash
     }
 }
+
+# Database setup for tracking
+def init_database():
+    """Initialize SQLite database for usage tracking and feedback"""
+    conn = sqlite3.connect('app_data.db', check_same_thread=False)
+    
+    # Create usage tracking table
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS usage_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            action_type TEXT,
+            user_session TEXT,
+            details TEXT
+        )
+    ''')
+    
+    # Create feedback table
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            feedback_type TEXT,
+            email TEXT,
+            subject TEXT,
+            message TEXT,
+            user_session TEXT
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+def track_usage(action_type: str, details: str = ""):
+    """Track user actions for analytics"""
+    try:
+        # Get or create session ID
+        if 'session_id' not in st.session_state:
+            st.session_state.session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{np.random.randint(1000, 9999)}"
+        
+        conn = sqlite3.connect('app_data.db', check_same_thread=False)
+        conn.execute('''
+            INSERT INTO usage_stats (action_type, user_session, details)
+            VALUES (?, ?, ?)
+        ''', (action_type, st.session_state.session_id, details))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        # Silently fail if database operations fail
+        pass
+
+def get_usage_stats():
+    """Get usage statistics from database"""
+    try:
+        conn = sqlite3.connect('app_data.db', check_same_thread=False)
+        
+        # Total app visits
+        total_visits = conn.execute('SELECT COUNT(DISTINCT user_session) FROM usage_stats').fetchone()[0]
+        
+        # Total simulations run
+        total_simulations = conn.execute(
+            'SELECT COUNT(*) FROM usage_stats WHERE action_type = "simulation_run"'
+        ).fetchone()[0]
+        
+        # Today's visits
+        today_visits = conn.execute('''
+            SELECT COUNT(DISTINCT user_session) FROM usage_stats 
+            WHERE date(timestamp) = date('now')
+        ''').fetchone()[0]
+        
+        conn.close()
+        return {
+            'total_visits': total_visits,
+            'total_simulations': total_simulations,
+            'today_visits': today_visits
+        }
+    except Exception as e:
+        return {'total_visits': 0, 'total_simulations': 0, 'today_visits': 0}
+
+def submit_feedback(feedback_type: str, email: str, subject: str, message: str):
+    """Submit user feedback to database"""
+    try:
+        if 'session_id' not in st.session_state:
+            st.session_state.session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{np.random.randint(1000, 9999)}"
+        
+        conn = sqlite3.connect('app_data.db', check_same_thread=False)
+        conn.execute('''
+            INSERT INTO feedback (feedback_type, email, subject, message, user_session)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (feedback_type, email, subject, message, st.session_state.session_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        return False
 
 @dataclass
 class AssetAllocation:
@@ -354,8 +451,70 @@ def get_risk_level_allocation(risk_level: str) -> AssetAllocation:
     }
     return allocations.get(risk_level, allocations['Moderate'])
 
+def show_feedback_form():
+    """Display feedback form in sidebar"""
+    with st.sidebar:
+        st.markdown("---")
+        st.subheader("💬 Feedback & Support")
+        
+        with st.expander("📝 Send Feedback", expanded=False):
+            feedback_type = st.selectbox(
+                "Type:",
+                ["Feature Request", "Bug Report", "General Feedback", "Question"]
+            )
+            
+            email = st.text_input(
+                "Email (optional):",
+                placeholder="your.email@example.com",
+                help="We'll only use this to respond to your feedback"
+            )
+            
+            subject = st.text_input(
+                "Subject:",
+                placeholder="Brief description of your feedback"
+            )
+            
+            message = st.text_area(
+                "Message:",
+                placeholder="Please describe your feedback, feature request, or bug report in detail...",
+                height=100
+            )
+            
+            if st.button("📤 Submit Feedback", type="primary"):
+                if message.strip() and subject.strip():
+                    success = submit_feedback(feedback_type, email, subject, message)
+                    if success:
+                        st.success("✅ Thank you for your feedback!")
+                        track_usage("feedback_submitted", f"Type: {feedback_type}")
+                        st.rerun()
+                    else:
+                        st.error("❌ Error submitting feedback. Please try again.")
+                else:
+                    st.error("⚠️ Please fill in both subject and message fields.")
+
+def show_usage_stats():
+    """Display usage statistics in sidebar"""
+    stats = get_usage_stats()
+    
+    with st.sidebar:
+        st.markdown("---")
+        st.subheader("📊 App Statistics")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Total Visits", f"{stats['total_visits']:,}")
+            st.metric("Today's Visits", f"{stats['today_visits']:,}")
+        with col2:
+            st.metric("Simulations Run", f"{stats['total_simulations']:,}")
+
 def main():
     """Main Streamlit application"""
+    
+    # Initialize database
+    init_database()
+    
+    # Track page visit
+    track_usage("page_visit", "Main page accessed")
 
     # Header
     st.title("💰 Advanced Retirement Planning Tool")
@@ -371,6 +530,7 @@ def main():
     # Load example data button
     if st.sidebar.button("🚀 Load Example Data"):
         st.session_state.example_loaded = True
+        track_usage("example_data_loaded", "User loaded example data")
 
     # Basic Information
     st.sidebar.subheader("💰 Basic Information")
@@ -443,6 +603,7 @@ def main():
             help="Conservative: Lower risk, lower returns. Aggressive: Higher risk, higher potential returns."
         )
         asset_allocation = get_risk_level_allocation(risk_level)
+        track_usage("allocation_selected", f"Risk level: {risk_level}")
     else:
         st.sidebar.write("**Custom Asset Allocation (must sum to 100%)**")
         equity_pct = st.sidebar.slider("Equity %", 0, 100, 60, 5, help="US Stock Market allocation")
@@ -459,6 +620,7 @@ def main():
             bonds=bonds_pct/100,
             cash=cash_pct/100
         )
+        track_usage("custom_allocation_set", f"Equity: {equity_pct}%, Bonds: {bonds_pct}%, Cash: {cash_pct}%")
 
     # Display expected returns based on allocation
     expected_return = (
@@ -517,6 +679,10 @@ def main():
         help="More simulations = more accurate results but slower computation"
     )
 
+    # Show usage statistics and feedback form in sidebar
+    show_usage_stats()
+    show_feedback_form()
+
     # Main content area
     col1, col2 = st.columns([2, 1])
 
@@ -548,6 +714,9 @@ def main():
             if monthly_income <= 0:
                 st.error("Please enter a positive monthly income")
             else:
+                # Track simulation run
+                track_usage("simulation_run", f"Years: {forecast_years}, Simulations: {num_simulations}")
+                
                 # Create profile
                 profile = FinancialProfile(
                     current_savings=current_savings,
@@ -570,6 +739,9 @@ def main():
 
     # Display results if simulation has been run
     if st.session_state.forecaster and st.session_state.forecaster.forecast_percentiles is not None:
+
+        # Track results viewing
+        track_usage("results_viewed", "User viewed simulation results")
 
         # Get simulation stats
         stats = st.session_state.forecaster._calculate_simulation_stats(
@@ -633,6 +805,7 @@ def main():
 
         with col1:
             if st.button("📊 Download Simulation Results"):
+                track_usage("data_downloaded", "Simulation results CSV downloaded")
                 csv = st.session_state.forecaster.forecast_percentiles.to_csv(index=False)
                 st.download_button(
                     label="Download CSV",
@@ -643,6 +816,7 @@ def main():
 
         with col2:
             if st.button("📋 Show Percentile Data"):
+                track_usage("data_table_viewed", "User viewed percentile data table")
                 # Show sample of data
                 sample_data = st.session_state.forecaster.forecast_percentiles.iloc[::12]  # Every year
                 st.dataframe(
@@ -658,6 +832,7 @@ def main():
 
     # Educational Content
     with st.expander("📚 Understanding Monte Carlo Simulation"):
+        track_usage("education_viewed", "User viewed educational content")
         st.markdown("""
         **What is Monte Carlo Simulation?**
         
@@ -686,7 +861,8 @@ def main():
         <div style='text-align: center'>
             <p>💡 <strong>Disclaimer:</strong> This tool provides estimates based on historical data and Monte Carlo simulation.
             Past performance does not guarantee future results. Consult a financial advisor for personalized advice.</p>
-            <p>Built with ❤️ using Streamlit</p>
+            <p>Built with ❤️ using Streamlit | 
+            <a href="#" onclick="document.querySelector('[data-testid=collapsedControl]').click()">📝 Send Feedback</a></p>
         </div>
         """,
         unsafe_allow_html=True

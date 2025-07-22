@@ -1,4 +1,4 @@
-# Financial Forecasting Web App
+# Financial Forecasting Web App with Monte Carlo Simulation
 # Save this as: financial_app.py
 # Run with: streamlit run financial_app.py
 
@@ -11,8 +11,9 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import json
+from scipy import stats
 
 # Set page configuration
 st.set_page_config(
@@ -22,238 +23,343 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Historical returns data (annual returns in decimal form)
+HISTORICAL_RETURNS = {
+    'equity': {
+        'mean': 0.1021,  # S&P 500 average annual return (1957-2021)
+        'std': 0.1605,   # S&P 500 standard deviation
+        'annual_returns': [  # Sample of actual historical returns for better simulation
+            0.2656, -0.0910, -0.1189, -0.2210, 0.2868, 0.0762, 0.1849, 0.0581, 0.1654, 0.3172,
+            -0.0306, 0.0762, 0.1006, 0.0134, 0.3720, 0.2268, -0.0657, -0.1022, 0.2103, 0.1021,
+            0.0503, 0.1675, 0.3149, 0.1838, 0.0581, -0.3700, 0.2639, 0.1506, 0.0221, 0.1596,
+            0.1171, -0.0491, 0.2168, 0.1328, 0.1906, 0.0034, 0.1354, 0.1896, -0.1431, -0.2697,
+            0.2868, 0.1488, 0.0600, -0.0918, 0.1056, 0.0491, 0.1579, 0.0549, -0.0177, 0.1575
+        ]
+    },
+    'bonds': {
+        'mean': 0.0564,   # US 10-year Treasury average return
+        'std': 0.0886,    # US 10-year Treasury standard deviation
+        'annual_returns': [  # Sample bond returns
+            0.0845, 0.1540, 0.0384, 0.1175, -0.0796, 0.0969, 0.1216, 0.0881, -0.0251, -0.0899,
+            0.1643, 0.0300, 0.0038, 0.2965, -0.0415, 0.0519, 0.0568, 0.2203, 0.0693, 0.1286,
+            -0.1108, 0.0846, 0.2302, 0.0697, 0.1521, -0.0711, 0.1081, 0.1203, 0.0654, -0.0262,
+            0.0664, 0.1484, -0.0496, 0.0584, 0.0735, 0.1311, -0.0013, -0.0758, 0.0515, 0.1398,
+            -0.0334, 0.0847, 0.1747, 0.0993, -0.1318, 0.0456, 0.0274, 0.1028, 0.0845, 0.0564
+        ]
+    },
+    'cash': {
+        'mean': 0.0287,   # 3-month Treasury bill average
+        'std': 0.0310,    # Very low volatility for cash
+        'annual_returns': [0.0287] * 50  # Simplified constant returns for cash
+    }
+}
+
+@dataclass
+class AssetAllocation:
+    """Class to hold asset allocation percentages"""
+    equity: float
+    bonds: float
+    cash: float
+    
+    def __post_init__(self):
+        total = self.equity + self.bonds + self.cash
+        if abs(total - 1.0) > 0.001:
+            raise ValueError(f"Asset allocation must sum to 100%. Current total: {total*100:.1f}%")
+
 @dataclass
 class FinancialProfile:
     """Class to hold current financial information"""
     current_savings: float
     monthly_income: float
     monthly_expenses: Dict[str, float]
-    annual_return_rate: float
+    asset_allocation: AssetAllocation
     inflation_rate: float
     tax_rate: float = 0.0
 
-class FinancialForecaster:
-    """Financial forecasting engine"""
+class MonteCarloForecaster:
+    """Financial forecasting engine with Monte Carlo simulation"""
 
     def __init__(self, profile: FinancialProfile):
         self.profile = profile
-        self.forecast_data = None
+        self.simulation_results = None
+        self.forecast_percentiles = None
 
     def calculate_monthly_savings(self) -> float:
         """Calculate monthly savings (income - expenses)"""
         total_expenses = sum(self.profile.monthly_expenses.values())
         return self.profile.monthly_income - total_expenses
 
-    def forecast(self, years: int = 10, start_date: Optional[datetime] = None) -> pd.DataFrame:
-        """Generate financial forecast for specified number of years"""
+    def generate_portfolio_returns(self, years: int, num_simulations: int = 1000) -> np.ndarray:
+        """Generate portfolio returns using historical data and Monte Carlo simulation"""
+        np.random.seed(42)  # For reproducible results
+        
+        # Create return matrices for each asset class
+        equity_returns = np.random.choice(
+            HISTORICAL_RETURNS['equity']['annual_returns'], 
+            size=(num_simulations, years)
+        )
+        
+        bond_returns = np.random.choice(
+            HISTORICAL_RETURNS['bonds']['annual_returns'], 
+            size=(num_simulations, years)
+        )
+        
+        cash_returns = np.random.choice(
+            HISTORICAL_RETURNS['cash']['annual_returns'], 
+            size=(num_simulations, years)
+        )
+        
+        # Calculate weighted portfolio returns
+        portfolio_returns = (
+            self.profile.asset_allocation.equity * equity_returns +
+            self.profile.asset_allocation.bonds * bond_returns +
+            self.profile.asset_allocation.cash * cash_returns
+        )
+        
+        return portfolio_returns
+
+    def monte_carlo_forecast(self, years: int = 10, num_simulations: int = 1000, 
+                           start_date: Optional[datetime] = None) -> Dict:
+        """Generate Monte Carlo simulation for financial forecast"""
         if start_date is None:
             start_date = datetime.now()
 
         months = years * 12
-        monthly_return_rate = self.profile.annual_return_rate / 12
         monthly_inflation_rate = self.profile.inflation_rate / 12
 
-        # Initialize lists to store data
-        dates = []
-        savings_balance = []
-        cumulative_savings = []
-        real_value = []
-        monthly_income = []
-        monthly_expenses = []
-        net_monthly_savings = []
+        # Generate annual portfolio returns for all simulations
+        portfolio_returns = self.generate_portfolio_returns(years, num_simulations)
+        
+        # Initialize results arrays
+        all_simulations = np.zeros((num_simulations, months + 1))
+        monthly_dates = []
+        
+        # Create date array
+        for month in range(months + 1):
+            current_date = start_date + timedelta(days=30 * month)
+            monthly_dates.append(current_date)
 
-        current_savings = self.profile.current_savings
         current_income = self.profile.monthly_income
         current_expense_total = sum(self.profile.monthly_expenses.values())
 
-        for month in range(months + 1):
-            current_date = start_date + timedelta(days=30 * month)
-            dates.append(current_date)
-
-            # Apply inflation to income and expenses
-            inflated_income = current_income * ((1 + monthly_inflation_rate) ** month)
-            inflated_expenses = current_expense_total * ((1 + monthly_inflation_rate) ** month)
-            inflated_savings = inflated_income - inflated_expenses
-
-            # Calculate investment growth
-            if month == 0:
-                current_balance = current_savings
-            else:
-                current_balance = (current_balance + inflated_savings) * (1 + monthly_return_rate)
+        # Run Monte Carlo simulations
+        for sim in range(num_simulations):
+            current_savings = self.profile.current_savings
+            all_simulations[sim, 0] = current_savings
+            
+            for month in range(1, months + 1):
+                year_index = min((month - 1) // 12, years - 1)
+                monthly_return_rate = portfolio_returns[sim, year_index] / 12
+                
+                # Apply inflation to income and expenses
+                inflated_income = current_income * ((1 + monthly_inflation_rate) ** month)
+                inflated_expenses = current_expense_total * ((1 + monthly_inflation_rate) ** month)
+                inflated_savings = inflated_income - inflated_expenses
+                
+                # Calculate investment growth
+                previous_balance = current_savings
+                current_savings = (current_savings + inflated_savings) * (1 + monthly_return_rate)
+                
+                # Apply taxes on returns
                 if self.profile.tax_rate > 0:
-                    returns = current_balance - (previous_balance + inflated_savings)
-                    taxes = returns * self.profile.tax_rate
-                    current_balance -= taxes
+                    returns = current_savings - (previous_balance + inflated_savings)
+                    if returns > 0:
+                        taxes = returns * self.profile.tax_rate
+                        current_savings -= taxes
+                
+                all_simulations[sim, month] = current_savings
 
-            # Calculate real (inflation-adjusted) value
-            real_balance = current_balance / ((1 + monthly_inflation_rate) ** month)
+        # Calculate percentiles
+        percentiles = [3, 10, 50, 90, 97]
+        percentile_results = {}
+        
+        for p in percentiles:
+            percentile_results[f'p{p}'] = np.percentile(all_simulations, p, axis=0)
 
-            # Store values
-            savings_balance.append(current_balance)
-            cumulative_savings.append(current_balance - self.profile.current_savings)
-            real_value.append(real_balance)
-            monthly_income.append(inflated_income)
-            monthly_expenses.append(inflated_expenses)
-            net_monthly_savings.append(inflated_savings)
-
-            previous_balance = current_balance
-
-        # Create DataFrame
-        self.forecast_data = pd.DataFrame({
-            'Date': dates,
-            'Savings_Balance': savings_balance,
-            'Cumulative_Growth': cumulative_savings,
-            'Real_Value': real_value,
-            'Monthly_Income': monthly_income,
-            'Monthly_Expenses': monthly_expenses,
-            'Net_Monthly_Savings': net_monthly_savings,
-            'Year': [d.year for d in dates],
-            'Month': [d.month for d in dates]
+        # Create summary DataFrame for easy plotting
+        summary_data = pd.DataFrame({
+            'Date': monthly_dates,
+            'P3': percentile_results['p3'],
+            'P10': percentile_results['p10'],
+            'P50': percentile_results['p50'],
+            'P90': percentile_results['p90'],
+            'P97': percentile_results['p97']
         })
 
-        return self.forecast_data
-
-    def get_summary_stats(self) -> Dict:
-        """Get summary statistics from the forecast"""
-        if self.forecast_data is None:
-            raise ValueError("Must run forecast() first")
-
-        final_row = self.forecast_data.iloc[-1]
-        initial_savings = self.profile.current_savings
+        self.simulation_results = all_simulations
+        self.forecast_percentiles = summary_data
 
         return {
-            'initial_savings': initial_savings,
-            'final_balance': final_row['Savings_Balance'],
-            'total_growth': final_row['Cumulative_Growth'],
-            'growth_percentage': (final_row['Savings_Balance'] / initial_savings - 1) * 100 if initial_savings > 0 else 0,
-            'final_real_value': final_row['Real_Value'],
-            'real_growth_percentage': (final_row['Real_Value'] / initial_savings - 1) * 100 if initial_savings > 0 else 0,
-            'average_monthly_savings': self.forecast_data['Net_Monthly_Savings'].mean(),
-            'total_contributions': self.forecast_data['Net_Monthly_Savings'].sum()
+            'percentiles': summary_data,
+            'all_simulations': all_simulations,
+            'simulation_stats': self._calculate_simulation_stats(all_simulations, monthly_dates)
         }
 
-    def scenario_analysis(self, scenarios: Dict[str, Dict]) -> pd.DataFrame:
-        """Run multiple scenarios with different parameters"""
-        results = []
+    def _calculate_simulation_stats(self, simulations: np.ndarray, dates: List[datetime]) -> Dict:
+        """Calculate summary statistics from simulation results"""
+        final_values = simulations[:, -1]
+        initial_savings = self.profile.current_savings
+        
+        return {
+            'initial_savings': initial_savings,
+            'mean_final_balance': np.mean(final_values),
+            'median_final_balance': np.median(final_values),
+            'std_final_balance': np.std(final_values),
+            'probability_positive': np.mean(final_values > initial_savings) * 100,
+            'probability_double': np.mean(final_values > initial_savings * 2) * 100,
+            'percentile_10': np.percentile(final_values, 10),
+            'percentile_90': np.percentile(final_values, 90),
+            'var_95': np.percentile(final_values, 5),  # Value at Risk (95% confidence)
+            'expected_shortfall': np.mean(final_values[final_values <= np.percentile(final_values, 5)])
+        }
 
-        for scenario_name, overrides in scenarios.items():
-            # Create modified profile
-            profile_dict = {
-                'current_savings': self.profile.current_savings,
-                'monthly_income': self.profile.monthly_income,
-                'monthly_expenses': self.profile.monthly_expenses,
-                'annual_return_rate': self.profile.annual_return_rate,
-                'inflation_rate': self.profile.inflation_rate,
-                'tax_rate': self.profile.tax_rate
-            }
-            profile_dict.update(overrides)
-
-            temp_profile = FinancialProfile(**profile_dict)
-            temp_forecaster = FinancialForecaster(temp_profile)
-            temp_forecaster.forecast(years=10)
-            stats = temp_forecaster.get_summary_stats()
-
-            results.append({
-                'Scenario': scenario_name,
-                'Final_Balance': stats['final_balance'],
-                'Real_Value': stats['final_real_value'],
-                'Total_Growth': stats['total_growth'],
-                'Growth_Percentage': stats['growth_percentage'],
-                'Real_Growth_Percentage': stats['real_growth_percentage']
-            })
-
-        return pd.DataFrame(results)
-
-def create_plotly_charts(forecaster):
-    """Create interactive Plotly charts"""
-    if forecaster.forecast_data is None:
+def create_monte_carlo_charts(forecaster: MonteCarloForecaster) -> go.Figure:
+    """Create interactive Monte Carlo simulation charts"""
+    if forecaster.forecast_percentiles is None:
         return None
 
-    data = forecaster.forecast_data
+    data = forecaster.forecast_percentiles
+    
+    # Create main chart with percentile bands
+    fig = go.Figure()
 
-    # Create subplots
-    fig = make_subplots(
-        rows=2, cols=2,
-        subplot_titles=('Savings Growth Over Time', 'Monthly Cash Flow',
-                       'Annual Growth Rate', 'Final Balance Composition'),
-        specs=[[{"secondary_y": False}, {"secondary_y": False}],
-               [{"secondary_y": False}, {"type": "pie"}]]
-    )
+    # Add percentile bands
+    fig.add_trace(go.Scatter(
+        x=data['Date'], 
+        y=data['P97'],
+        mode='lines',
+        line=dict(color='rgba(0,0,0,0)'),
+        showlegend=False,
+        name='97th Percentile'
+    ))
 
-    # Plot 1: Savings Growth Over Time
-    fig.add_trace(
-        go.Scatter(x=data['Date'], y=data['Savings_Balance'],
-                  mode='lines', name='Nominal Value', line=dict(color='blue', width=3)),
-        row=1, col=1
-    )
-    fig.add_trace(
-        go.Scatter(x=data['Date'], y=data['Real_Value'],
-                  mode='lines', name='Real Value', line=dict(color='red', width=3, dash='dash')),
-        row=1, col=1
-    )
+    fig.add_trace(go.Scatter(
+        x=data['Date'], 
+        y=data['P3'],
+        mode='lines',
+        line=dict(color='rgba(0,0,0,0)'),
+        fill='tonexty',
+        fillcolor='rgba(255,182,193,0.2)',
+        showlegend=True,
+        name='3rd-97th Percentile Range'
+    ))
 
-    # Plot 2: Monthly Cash Flow
-    fig.add_trace(
-        go.Scatter(x=data['Date'], y=data['Monthly_Income'],
-                  mode='lines', name='Income', fill='tonexty', fillcolor='rgba(0,255,0,0.3)'),
-        row=1, col=2
-    )
-    fig.add_trace(
-        go.Scatter(x=data['Date'], y=-data['Monthly_Expenses'],
-                  mode='lines', name='Expenses', fill='tozeroy', fillcolor='rgba(255,0,0,0.3)'),
-        row=1, col=2
-    )
-    fig.add_trace(
-        go.Scatter(x=data['Date'], y=data['Net_Monthly_Savings'],
-                  mode='lines', name='Net Savings', line=dict(color='blue', width=3)),
-        row=1, col=2
-    )
+    fig.add_trace(go.Scatter(
+        x=data['Date'], 
+        y=data['P90'],
+        mode='lines',
+        line=dict(color='rgba(255,165,0,0.8)', width=2),
+        showlegend=False,
+        name='90th Percentile'
+    ))
 
-    # Plot 3: Annual Growth Rate
-    annual_data = data.groupby('Year').last()
-    if len(annual_data) > 1:
-        annual_growth = annual_data['Savings_Balance'].pct_change() * 100
-        fig.add_trace(
-            go.Bar(x=annual_data.index[1:], y=annual_growth[1:],
-                  name='Annual Growth', marker_color='purple'),
-            row=2, col=1
-        )
+    fig.add_trace(go.Scatter(
+        x=data['Date'], 
+        y=data['P10'],
+        mode='lines',
+        line=dict(color='rgba(255,165,0,0.8)', width=2),
+        fill='tonexty',
+        fillcolor='rgba(255,215,0,0.3)',
+        showlegend=True,
+        name='10th-90th Percentile Range'
+    ))
 
-    # Plot 4: Final Balance Composition
-    stats = forecaster.get_summary_stats()
-    labels = ['Initial Savings', 'Investment Returns', 'Contributions']
-    values = [
-        forecaster.profile.current_savings,
-        max(0, stats['final_balance'] - stats['total_contributions'] - forecaster.profile.current_savings),
-        max(0, stats['total_contributions'])
-    ]
-
-    # Filter out zero values
-    non_zero = [(l, v) for l, v in zip(labels, values) if v > 0]
-    if non_zero:
-        labels, values = zip(*non_zero)
-        fig.add_trace(
-            go.Pie(labels=labels, values=values, name="Balance Composition"),
-            row=2, col=2
-        )
+    # Add median line
+    fig.add_trace(go.Scatter(
+        x=data['Date'], 
+        y=data['P50'],
+        mode='lines',
+        line=dict(color='blue', width=3),
+        name='Median (50th Percentile)'
+    ))
 
     # Update layout
-    fig.update_layout(height=800, showlegend=True, title_text="Financial Forecast Analysis")
-    fig.update_xaxes(title_text="Date", row=1, col=1)
-    fig.update_xaxes(title_text="Date", row=1, col=2)
-    fig.update_xaxes(title_text="Year", row=2, col=1)
-    fig.update_yaxes(title_text="Balance ($)", row=1, col=1)
-    fig.update_yaxes(title_text="Amount ($)", row=1, col=2)
-    fig.update_yaxes(title_text="Growth Rate (%)", row=2, col=1)
+    fig.update_layout(
+        title='Monte Carlo Simulation: Portfolio Value Over Time',
+        xaxis_title='Date',
+        yaxis_title='Portfolio Value ($)',
+        height=600,
+        hovermode='x unified',
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="left",
+            x=0.01
+        )
+    )
+
+    # Format y-axis as currency
+    fig.update_yaxes(tickformat='$,.0f')
 
     return fig
+
+def create_allocation_pie_chart(allocation: AssetAllocation) -> go.Figure:
+    """Create pie chart for asset allocation"""
+    labels = ['Equity', 'Bonds', 'Cash']
+    values = [allocation.equity * 100, allocation.bonds * 100, allocation.cash * 100]
+    colors = ['#ff9999', '#66b3ff', '#99ff99']
+    
+    fig = go.Figure(data=[go.Pie(
+        labels=labels, 
+        values=values,
+        marker_colors=colors,
+        textinfo='label+percent',
+        textfont_size=12
+    )])
+    
+    fig.update_layout(
+        title='Asset Allocation',
+        height=400
+    )
+    
+    return fig
+
+def create_risk_metrics_chart(stats: Dict) -> go.Figure:
+    """Create chart showing risk metrics"""
+    metrics = ['10th Percentile', 'Median', '90th Percentile', 'Value at Risk (5%)']
+    values = [
+        stats['percentile_10'],
+        stats['median_final_balance'],
+        stats['percentile_90'],
+        stats['var_95']
+    ]
+    
+    colors = ['red', 'blue', 'green', 'orange']
+    
+    fig = go.Figure(data=[go.Bar(
+        x=metrics,
+        y=values,
+        marker_color=colors,
+        text=[f'${v:,.0f}' for v in values],
+        textposition='auto'
+    )])
+    
+    fig.update_layout(
+        title='Risk Metrics: Final Portfolio Value',
+        yaxis_title='Portfolio Value ($)',
+        height=400
+    )
+    
+    fig.update_yaxes(tickformat='$,.0f')
+    
+    return fig
+
+def get_risk_level_allocation(risk_level: str) -> AssetAllocation:
+    """Get predefined asset allocation based on risk level"""
+    allocations = {
+        'Conservative': AssetAllocation(equity=0.30, bonds=0.60, cash=0.10),
+        'Moderate': AssetAllocation(equity=0.60, bonds=0.35, cash=0.05),
+        'Aggressive': AssetAllocation(equity=0.80, bonds=0.15, cash=0.05),
+        'Very Aggressive': AssetAllocation(equity=0.90, bonds=0.10, cash=0.00)
+    }
+    return allocations.get(risk_level, allocations['Moderate'])
 
 def main():
     """Main Streamlit application"""
 
     # Header
-    st.title("💰 Financial Forecasting Tool")
-    st.markdown("Plan your financial future with interactive forecasting and scenario analysis")
+    st.title("💰 Advanced Retirement Planning Tool")
+    st.markdown("Plan your financial future with Monte Carlo simulation and historical market data")
 
     # Initialize session state
     if 'forecaster' not in st.session_state:
@@ -270,7 +376,7 @@ def main():
     st.sidebar.subheader("💰 Basic Information")
 
     if 'example_loaded' in st.session_state:
-        default_savings = 50000.0
+        default_savings = 100000.0
         default_income = 8000.0
     else:
         default_savings = 0.0
@@ -321,23 +427,63 @@ def main():
             step=50.0
         )
 
-    # Investment Parameters
-    st.sidebar.subheader("📈 Investment Parameters")
-
-    return_rate = st.sidebar.slider(
-        "Annual Return Rate (%)",
-        min_value=-20.0,
-        max_value=30.0,
-        value=7.0 if 'example_loaded' in st.session_state else 7.0,
-        step=0.5,
-        help="Expected annual return on your investments"
+    # Asset Allocation
+    st.sidebar.subheader("📈 Asset Allocation")
+    
+    allocation_method = st.sidebar.radio(
+        "Choose allocation method:",
+        ['Predefined Risk Level', 'Custom Allocation']
     )
+    
+    if allocation_method == 'Predefined Risk Level':
+        risk_level = st.sidebar.selectbox(
+            "Risk Level",
+            ['Conservative', 'Moderate', 'Aggressive', 'Very Aggressive'],
+            index=1,
+            help="Conservative: Lower risk, lower returns. Aggressive: Higher risk, higher potential returns."
+        )
+        asset_allocation = get_risk_level_allocation(risk_level)
+    else:
+        st.sidebar.write("**Custom Asset Allocation (must sum to 100%)**")
+        equity_pct = st.sidebar.slider("Equity %", 0, 100, 60, 5, help="US Stock Market allocation")
+        bonds_pct = st.sidebar.slider("Bonds %", 0, 100, 35, 5, help="US Bond Market allocation")
+        cash_pct = st.sidebar.slider("Cash %", 0, 100, 5, 5, help="Cash/Money Market allocation")
+        
+        total_allocation = equity_pct + bonds_pct + cash_pct
+        if total_allocation != 100:
+            st.sidebar.error(f"Allocation must sum to 100%. Current: {total_allocation}%")
+            st.sidebar.stop()
+        
+        asset_allocation = AssetAllocation(
+            equity=equity_pct/100,
+            bonds=bonds_pct/100,
+            cash=cash_pct/100
+        )
+
+    # Display expected returns based on allocation
+    expected_return = (
+        asset_allocation.equity * HISTORICAL_RETURNS['equity']['mean'] +
+        asset_allocation.bonds * HISTORICAL_RETURNS['bonds']['mean'] +
+        asset_allocation.cash * HISTORICAL_RETURNS['cash']['mean']
+    )
+    
+    expected_volatility = np.sqrt(
+        (asset_allocation.equity ** 2) * (HISTORICAL_RETURNS['equity']['std'] ** 2) +
+        (asset_allocation.bonds ** 2) * (HISTORICAL_RETURNS['bonds']['std'] ** 2) +
+        (asset_allocation.cash ** 2) * (HISTORICAL_RETURNS['cash']['std'] ** 2)
+    )
+    
+    st.sidebar.info(f"**Expected Annual Return:** {expected_return:.1%}")
+    st.sidebar.info(f"**Expected Volatility:** {expected_volatility:.1%}")
+
+    # Other Parameters
+    st.sidebar.subheader("⚙️ Other Parameters")
 
     inflation_rate = st.sidebar.slider(
         "Inflation Rate (%)",
         min_value=0.0,
         max_value=10.0,
-        value=3.0 if 'example_loaded' in st.session_state else 3.0,
+        value=3.0,
         step=0.1,
         help="Expected annual inflation rate"
     )
@@ -346,20 +492,29 @@ def main():
         "Tax Rate on Returns (%)",
         min_value=0.0,
         max_value=50.0,
-        value=15.0 if 'example_loaded' in st.session_state else 15.0,
+        value=15.0,
         step=1.0,
         help="Tax rate applied to investment gains"
     )
 
-    # Forecast Settings
-    st.sidebar.subheader("⏰ Forecast Settings")
+    # Simulation Settings
+    st.sidebar.subheader("🎲 Simulation Settings")
 
     forecast_years = st.sidebar.slider(
         "Years to Forecast",
         min_value=1,
         max_value=50,
-        value=15 if 'example_loaded' in st.session_state else 15,
+        value=25,
         help="Number of years to project into the future"
+    )
+
+    num_simulations = st.sidebar.slider(
+        "Number of Simulations",
+        min_value=100,
+        max_value=5000,
+        value=1000,
+        step=100,
+        help="More simulations = more accurate results but slower computation"
     )
 
     # Main content area
@@ -384,9 +539,12 @@ def main():
         else:
             st.success(f"✅ Great! You're saving ${monthly_savings:,.0f} per month")
 
+        # Show asset allocation pie chart
+        st.plotly_chart(create_allocation_pie_chart(asset_allocation), use_container_width=True)
+
     with col1:
         # Run Forecast Button
-        if st.button("🚀 Run Forecast", type="primary", use_container_width=True):
+        if st.button("🚀 Run Monte Carlo Simulation", type="primary", use_container_width=True):
             if monthly_income <= 0:
                 st.error("Please enter a positive monthly income")
             else:
@@ -395,116 +553,139 @@ def main():
                     current_savings=current_savings,
                     monthly_income=monthly_income,
                     monthly_expenses={k: v for k, v in expenses.items() if v > 0},
-                    annual_return_rate=return_rate / 100,
+                    asset_allocation=asset_allocation,
                     inflation_rate=inflation_rate / 100,
                     tax_rate=tax_rate / 100
                 )
 
-                # Create forecaster and run forecast
-                st.session_state.forecaster = FinancialForecaster(profile)
-                with st.spinner("Running forecast..."):
-                    st.session_state.forecaster.forecast(years=forecast_years)
+                # Create forecaster and run simulation
+                st.session_state.forecaster = MonteCarloForecaster(profile)
+                with st.spinner(f"Running {num_simulations:,} Monte Carlo simulations..."):
+                    results = st.session_state.forecaster.monte_carlo_forecast(
+                        years=forecast_years, 
+                        num_simulations=num_simulations
+                    )
 
-                st.success("✅ Forecast completed!")
+                st.success("✅ Monte Carlo simulation completed!")
 
-    # Display results if forecast has been run
-    if st.session_state.forecaster and st.session_state.forecaster.forecast_data is not None:
+    # Display results if simulation has been run
+    if st.session_state.forecaster and st.session_state.forecaster.forecast_percentiles is not None:
+
+        # Get simulation stats
+        stats = st.session_state.forecaster._calculate_simulation_stats(
+            st.session_state.forecaster.simulation_results,
+            st.session_state.forecaster.forecast_percentiles['Date'].tolist()
+        )
 
         # Summary Statistics
-        st.subheader("📊 Forecast Summary")
-        stats = st.session_state.forecaster.get_summary_stats()
-
+        st.subheader("📊 Simulation Results Summary")
+        
         col1, col2, col3, col4 = st.columns(4)
-
         with col1:
-            st.metric("Final Balance", f"${stats['final_balance']:,.0f}")
+            st.metric("Median Final Value", f"${stats['median_final_balance']:,.0f}")
         with col2:
-            st.metric("Total Growth", f"${stats['total_growth']:,.0f}")
+            st.metric("10th Percentile", f"${stats['percentile_10']:,.0f}")
         with col3:
-            st.metric("Growth %", f"{stats['growth_percentage']:.1f}%")
+            st.metric("90th Percentile", f"${stats['percentile_90']:,.0f}")
         with col4:
-            st.metric("Real Value", f"${stats['final_real_value']:,.0f}")
+            st.metric("Mean Final Value", f"${stats['mean_final_balance']:,.0f}")
 
-        # Interactive Charts
-        st.subheader("📈 Interactive Charts")
-        fig = create_plotly_charts(st.session_state.forecaster)
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Probability of Gain", f"{stats['probability_positive']:.1f}%")
+        with col2:
+            st.metric("Probability of Doubling", f"{stats['probability_double']:.1f}%")
+        with col3:
+            st.metric("Value at Risk (95%)", f"${stats['var_95']:,.0f}")
+
+        # Main Monte Carlo Chart
+        st.subheader("📈 Monte Carlo Simulation Results")
+        fig = create_monte_carlo_charts(st.session_state.forecaster)
         if fig:
             st.plotly_chart(fig, use_container_width=True)
 
-        # Scenario Analysis
-        st.subheader("🎭 Scenario Analysis")
-
-        if st.button("Run Scenario Analysis"):
-            scenarios = {
-                'Conservative': {'annual_return_rate': 0.04},
-                'Base Case': {},
-                'Optimistic': {'annual_return_rate': 0.10},
-                'High Inflation': {'inflation_rate': 0.05},
-                'Market Crash': {'annual_return_rate': -0.10},
-                'Salary Boost': {'monthly_income': monthly_income * 1.2}
-            }
-
-            with st.spinner("Running scenarios..."):
-                scenario_results = st.session_state.forecaster.scenario_analysis(scenarios)
-
-            # Display scenario results
-            st.dataframe(
-                scenario_results.style.format({
-                    'Final_Balance': '${:,.0f}',
-                    'Real_Value': '${:,.0f}',
-                    'Total_Growth': '${:,.0f}',
-                    'Growth_Percentage': '{:.1f}%',
-                    'Real_Growth_Percentage': '{:.1f}%'
-                }),
-                use_container_width=True
-            )
-
-            # Scenario comparison chart
-            fig_scenario = px.bar(
-                scenario_results,
-                x='Scenario',
-                y='Final_Balance',
-                title="Final Balance by Scenario",
-                color='Growth_Percentage',
-                color_continuous_scale='RdYlGn'
-            )
-            fig_scenario.update_layout(height=400)
-            st.plotly_chart(fig_scenario, use_container_width=True)
+        # Risk Metrics Chart
+        st.subheader("📊 Risk Analysis")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            risk_fig = create_risk_metrics_chart(stats)
+            st.plotly_chart(risk_fig, use_container_width=True)
+        
+        with col2:
+            st.subheader("Key Statistics")
+            st.write(f"**Initial Investment:** ${stats['initial_savings']:,.0f}")
+            st.write(f"**Standard Deviation:** ${stats['std_final_balance']:,.0f}")
+            st.write(f"**Expected Shortfall (5%):** ${stats['expected_shortfall']:,.0f}")
+            
+            # Calculate some additional metrics
+            final_percentiles = st.session_state.forecaster.forecast_percentiles.iloc[-1]
+            st.write("**Final Value Percentiles:**")
+            st.write(f"- 3rd percentile: ${final_percentiles['P3']:,.0f}")
+            st.write(f"- 10th percentile: ${final_percentiles['P10']:,.0f}")
+            st.write(f"- 50th percentile: ${final_percentiles['P50']:,.0f}")
+            st.write(f"- 90th percentile: ${final_percentiles['P90']:,.0f}")
+            st.write(f"- 97th percentile: ${final_percentiles['P97']:,.0f}")
 
         # Data Export
         st.subheader("💾 Export Data")
         col1, col2 = st.columns(2)
 
         with col1:
-            if st.button("📊 Download Forecast Data"):
-                csv = st.session_state.forecaster.forecast_data.to_csv(index=False)
+            if st.button("📊 Download Simulation Results"):
+                csv = st.session_state.forecaster.forecast_percentiles.to_csv(index=False)
                 st.download_button(
                     label="Download CSV",
                     data=csv,
-                    file_name=f"financial_forecast_{datetime.now().strftime('%Y%m%d')}.csv",
+                    file_name=f"monte_carlo_forecast_{datetime.now().strftime('%Y%m%d')}.csv",
                     mime='text/csv'
                 )
 
         with col2:
-            if st.button("📋 Show Data Table"):
+            if st.button("📋 Show Percentile Data"):
                 # Show sample of data
-                sample_data = st.session_state.forecaster.forecast_data.iloc[::12]  # Every year
+                sample_data = st.session_state.forecaster.forecast_percentiles.iloc[::12]  # Every year
                 st.dataframe(
-                    sample_data[['Date', 'Savings_Balance', 'Real_Value', 'Net_Monthly_Savings']].style.format({
-                        'Savings_Balance': '${:,.0f}',
-                        'Real_Value': '${:,.0f}',
-                        'Net_Monthly_Savings': '${:,.0f}'
+                    sample_data.style.format({
+                        'P3': '${:,.0f}',
+                        'P10': '${:,.0f}',
+                        'P50': '${:,.0f}',
+                        'P90': '${:,.0f}',
+                        'P97': '${:,.0f}'
                     }),
                     use_container_width=True
                 )
+
+    # Educational Content
+    with st.expander("📚 Understanding Monte Carlo Simulation"):
+        st.markdown("""
+        **What is Monte Carlo Simulation?**
+        
+        Monte Carlo simulation runs thousands of possible scenarios for your portfolio using historical market data. 
+        Instead of assuming a fixed return rate, it accounts for market volatility and uncertainty.
+        
+        **How to Read the Results:**
+        
+        - **Median (50th Percentile):** Half of all simulations result in values above this line
+        - **10th-90th Percentile Band:** 80% of outcomes fall within this range  
+        - **3rd-97th Percentile Band:** 94% of outcomes fall within this range
+        - **Value at Risk (95%):** There's only a 5% chance your portfolio will be worth less than this amount
+        
+        **Historical Data Sources:**
+        - **Equity Returns:** Based on S&P 500 historical performance (1957-2021)
+        - **Bond Returns:** Based on US 10-year Treasury bond historical performance
+        - **Cash Returns:** Based on 3-month Treasury bill rates
+        
+        This simulation helps you understand the range of possible outcomes and make more informed decisions about your retirement planning.
+        """)
 
     # Footer
     st.markdown("---")
     st.markdown(
         """
         <div style='text-align: center'>
-            <p>💡 <strong>Tip:</strong> This tool provides estimates based on your inputs.
-            Actual results may vary due to market conditions and life changes.</p>
+            <p>💡 <strong>Disclaimer:</strong> This tool provides estimates based on historical data and Monte Carlo simulation.
+            Past performance does not guarantee future results. Consult a financial advisor for personalized advice.</p>
             <p>Built with ❤️ using Streamlit</p>
         </div>
         """,
